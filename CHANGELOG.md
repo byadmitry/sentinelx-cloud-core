@@ -3,6 +3,25 @@
 Notable changes to `sentinelx-cloud-core`. Human-readable, date-stamped
 entries; releases before 0.3.0 predate this file — see the git history.
 
+## 0.22.1 - exec kills the whole process tree on timeout and cancellation - 2026-09-28
+
+- Contributed by @Bl0ck154 (PR #51, sxrep_WDBZY235Y77Z): exec, run_shell_split and
+  command help start the shell in its own process group on POSIX and kill the
+  whole group on timeout and on cancellation (re-raising the cancellation);
+  Windows keeps a tree-aware taskkill /T /F. Before, only the shell was killed,
+  and its descendants survived: in production a timed-out exec left a sqlite3
+  reparented to PID 1 using a full core for over 30 minutes.
+- Review found a second form of the same defect: when the children kept the
+  output pipes open, the old code waited for them to exit, so the exec timeout
+  was ignored (a 0.5 s timeout returned after 20 s). Fixed by the same change.
+- Behaviour change: when exec times out, everything the command started dies,
+  including jobs it put in the background with &. For long-running work use
+  systemd-run, or start the job with its output redirected so exec returns at
+  once instead of timing out.
+- Follow-up: taskkill goes through spawn_kwargs (no console window on per-user
+  Windows installs); tests that follow the children's real PIDs, since the
+  process-group ones also passed against the old code.
+
 ## 0.22.0 - A dry-run edit leaves no trace in the target's directory - 2026-09-26
 
 - sentinel_edit with dry_run=true was not side-effect free (reported on a QNAP CIFS

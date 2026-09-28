@@ -35,11 +35,11 @@ def _kill_process_tree(proc: asyncio.subprocess.Process) -> None:
     """Best-effort kill of the shell and every descendant it started."""
     if sys.platform == "win32":
         try:
+            # spawn_kwargs adds CREATE_NO_WINDOW, like every other child we
+            # start: without it, a per-user install (pythonw) flashes a console.
             completed = subprocess.run(
                 ["taskkill", "/T", "/F", "/PID", str(proc.pid)],
-                capture_output=True,
-                timeout=10,
-                check=False,
+                **spawn_kwargs(capture_output=True, timeout=10, check=False),
             )
             if completed.returncode == 0:
                 return
