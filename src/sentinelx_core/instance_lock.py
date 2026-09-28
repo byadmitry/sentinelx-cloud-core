@@ -45,12 +45,18 @@ def lock_path(identity_path: Path, host_id: str) -> Path | None:
     return rp.parent / f"agent-{safe}.lock"
 
 
+# On Windows a locked byte can't be read by other processes, so locking byte 0
+# hid the holder's pid from the instance that was refused ("pid ?"). Lock a byte
+# well past the pid instead; Windows allows locking beyond the end of a file.
+_WIN_LOCK_OFFSET = 1 << 20
+
+
 def _lock(fh: IO[str]) -> None:
     """Take the lock without waiting; OSError if another process holds it."""
     if sys.platform == "win32":
         import msvcrt
 
-        fh.seek(0)
+        fh.seek(_WIN_LOCK_OFFSET)
         msvcrt.locking(fh.fileno(), msvcrt.LK_NBLCK, 1)
     else:
         import fcntl
@@ -61,7 +67,7 @@ def _lock(fh: IO[str]) -> None:
 def _holder(path: Path) -> str | None:
     try:
         text = path.read_text().strip()
-    except OSError:  # on Windows the locked byte can't be read by others
+    except OSError:
         return None
     return text if text.isdigit() else None
 

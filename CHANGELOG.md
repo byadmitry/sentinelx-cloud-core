@@ -3,6 +3,13 @@
 Notable changes to `sentinelx-cloud-core`. Human-readable, date-stamped
 entries; releases before 0.3.0 predate this file — see the git history.
 
+## 0.23.1 - Windows: the refused instance can read who holds the lock - 2026-09-28
+
+- Verified on a real Windows 11 host: a second instance exits with code 3, and
+  after the first is killed with its whole tree the lock is free again. But the
+  message read "pid ?": msvcrt locked byte 0, and a locked byte can't be read by
+  other processes on Windows. The lock now sits 1 MiB into the file, past the pid.
+
 ## 0.23.0 - One running agent per host on a machine - 2026-09-28
 
 - Two agents with the same identity drop each other on every connect: the hub

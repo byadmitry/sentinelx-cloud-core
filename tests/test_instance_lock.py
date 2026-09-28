@@ -109,7 +109,8 @@ def test_windows_takes_a_non_blocking_msvcrt_lock(state_dir, monkeypatch):
     calls = []
 
     def locking(fd, mode, nbytes):
-        calls.append((mode, nbytes))
+        # where the lock sits: past the pid, so a refused instance can read it
+        calls.append((mode, nbytes, os.lseek(fd, 0, os.SEEK_CUR)))
         if len(calls) > 1:
             raise OSError("locked")
 
@@ -118,7 +119,8 @@ def test_windows_takes_a_non_blocking_msvcrt_lock(state_dir, monkeypatch):
     assert L.acquire(IDENT, "host_w") is not None
     with pytest.raises(L.AlreadyRunning):
         L.acquire(IDENT, "host_w")
-    assert calls == [(2, 1), (2, 1)]
+    assert calls == [(2, 1, L._WIN_LOCK_OFFSET), (2, 1, L._WIN_LOCK_OFFSET)]
+    assert L._WIN_LOCK_OFFSET > 64  # well past any pid written at offset 0
 
 
 def test_verify_enrollment_runs_without_taking_the_lock():
