@@ -105,6 +105,15 @@ def main() -> None:
             )
         sys.exit(1)
 
+    # One agent per host on this machine: a leftover or duplicate instance
+    # exits here instead of connecting and dropping the running one. Held in a
+    # local for the whole run; the OS releases it when the process ends.
+    from sentinelx_core.instance_lock import hold_or_exit
+
+    _instance_lock = hold_or_exit(  # noqa: F841
+        Path(args.identity), identity.host_id, logging.getLogger("sentinelx_core")
+    )
+
     client = HubClient(
         hub_url=hub_url,
         identity=identity,

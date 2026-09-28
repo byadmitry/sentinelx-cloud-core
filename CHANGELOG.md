@@ -3,6 +3,27 @@
 Notable changes to `sentinelx-cloud-core`. Human-readable, date-stamped
 entries; releases before 0.3.0 predate this file — see the git history.
 
+## 0.23.0 - One running agent per host on a machine - 2026-09-28
+
+- Two agents with the same identity drop each other on every connect: the hub
+  keeps the newest session and closes the other, which reconnects at once. On a
+  Windows service install, restarts could leave the previous agent running (the
+  venv's python.exe is a launcher whose child interpreter could outlive the
+  service's process); win-acer ran ~44,000 such reconnects in 2.5 hours
+  (sxrep_NVKZAMSWX6XJ, diagnosed by the user after our first, wrong guess).
+- At startup the agent now takes an exclusive OS lock (flock on POSIX, msvcrt on
+  Windows) and holds it for its whole life. A second instance for the same host
+  logs why and exits with code 3; non-zero on purpose, so WinSW and systemd retry
+  and it takes over once the other process is gone. The OS releases the lock
+  when the holder dies, so a crash never leaves it stuck.
+- The lock is per host id, in the directory the agent owns for its rotated
+  credential, so different agents on one machine (a prod and a dev agent) never
+  block each other. With no writable directory the agent runs unprotected rather
+  than not at all. --verify-enrollment exits before the lock and still runs
+  alongside a live agent.
+- Behaviour change: a second copy of the agent for the same host no longer runs.
+  Duplicates across different machines (a copied identity) are not covered here.
+
 ## 0.22.1 - exec kills the whole process tree on timeout and cancellation - 2026-09-28
 
 - Contributed by @Bl0ck154 (PR #51, sxrep_WDBZY235Y77Z): exec, run_shell_split and
