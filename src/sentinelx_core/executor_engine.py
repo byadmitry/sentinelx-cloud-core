@@ -10,13 +10,67 @@ Source: /home/carlos/projects/sentinelx/agent.py (legacy SentinelX 0.3.5)
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
-import shlex
+import signal
+import subprocess
 import sys
 import time
 from pathlib import Path
 from typing import Any
+
 from sentinelx_core.winspawn import spawn_kwargs
+
+logger = logging.getLogger(__name__)
+
+
+def _process_group_kwargs() -> dict[str, Any]:
+    """Start the shell in a killable process group on POSIX."""
+    if sys.platform == "win32":
+        return {}
+    return {"start_new_session": True}
+
+
+def _kill_process_tree(proc: asyncio.subprocess.Process) -> None:
+    """Best-effort kill of the shell and every descendant it started."""
+    if sys.platform == "win32":
+        try:
+            completed = subprocess.run(
+                ["taskkill", "/T", "/F", "/PID", str(proc.pid)],
+                capture_output=True,
+                timeout=10,
+                check=False,
+            )
+            if completed.returncode == 0:
+                return
+        except (OSError, subprocess.SubprocessError):
+            logger.debug("taskkill process-tree cleanup failed", exc_info=True)
+    else:
+        try:
+            pgid = os.getpgid(proc.pid)
+        except (ProcessLookupError, OSError):
+            pgid = None
+        if pgid is not None:
+            try:
+                os.killpg(pgid, signal.SIGKILL)
+                return
+            except ProcessLookupError:
+                return
+            except PermissionError:
+                pass
+
+    try:
+        proc.kill()
+    except ProcessLookupError:
+        pass
+
+
+async def _stop_process_tree(proc: asyncio.subprocess.Process) -> None:
+    _kill_process_tree(proc)
+    try:
+        await proc.wait()
+    except ProcessLookupError:
+        pass
 
 
 def _shell_argv(cmd: str) -> list[str]:
@@ -127,19 +181,22 @@ async def run_shell(
                 stderr=asyncio.subprocess.PIPE,
                 cwd=cwd,
                 env=full_env,
+                **_process_group_kwargs(),
             ),
         )
         try:
             stdout_b, stderr_b = await asyncio.wait_for(proc.communicate(), timeout=timeout)
-        except asyncio.TimeoutError:
-            proc.kill()
-            await proc.wait()
+        except TimeoutError:
+            await _stop_process_tree(proc)
             return {
                 "output": "⏱️ Timeout",
                 "duration": round(time.time() - start, 2),
                 "returncode": -1,
                 "timed_out": True,
             }
+        except asyncio.CancelledError:
+            await _stop_process_tree(proc)
+            raise
 
         stdout = stdout_b.decode(errors="replace").strip()
         stderr = stderr_b.decode(errors="replace").strip()
@@ -188,19 +245,22 @@ async def run_shell_split(
                 stderr=asyncio.subprocess.PIPE,
                 cwd=cwd,
                 env=full_env,
+                **_process_group_kwargs(),
             ),
         )
         try:
             stdout_b, stderr_b = await asyncio.wait_for(proc.communicate(), timeout=timeout)
-        except asyncio.TimeoutError:
-            proc.kill()
-            await proc.wait()
+        except TimeoutError:
+            await _stop_process_tree(proc)
             return {
                 "stdout": "",
                 "stderr": "⏱️ Timeout",
                 "duration": round(time.time() - start, 2),
                 "returncode": -1,
             }
+        except asyncio.CancelledError:
+            await _stop_process_tree(proc)
+            raise
 
         return {
             "stdout": stdout_b.decode(errors="replace"),
@@ -230,14 +290,17 @@ async def get_command_help(cmd: str, timeout: float = 10.0) -> str:
             **spawn_kwargs(
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                **_process_group_kwargs(),
             ),
         )
         try:
             stdout_b, stderr_b = await asyncio.wait_for(proc.communicate(), timeout=timeout)
-        except asyncio.TimeoutError:
-            proc.kill()
-            await proc.wait()
-            return f"Error getting help: timeout"
+        except TimeoutError:
+            await _stop_process_tree(proc)
+            return "Error getting help: timeout"
+        except asyncio.CancelledError:
+            await _stop_process_tree(proc)
+            raise
 
         text = stdout_b.decode(errors="replace") or stderr_b.decode(errors="replace") or "No help available"
         return text.strip()
