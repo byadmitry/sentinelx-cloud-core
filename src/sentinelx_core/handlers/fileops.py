@@ -71,7 +71,8 @@ NOT scheduling anything else — including the WebSocket control plane
 
 So each op is written as a plain synchronous `_*_blocking` function
 holding all of the policy, traversal and bounding logic, and the async
-handler is a thin wrapper that hands it to `asyncio.to_thread`. That is
+handler is a thin wrapper that hands it to a dedicated thread pool
+(_READ_POOL for read, _SCAN_POOL for list/search; see sxrep_TCWAAH5ATMFH). That is
 the default executor: a bounded, shared thread pool, so no dedicated
 thread is created per request. Semantics are unchanged — the same
 function body, the same HandlerError propagation, the same response
@@ -81,6 +82,7 @@ shape — only the thread it runs on differs.
 from __future__ import annotations
 
 import asyncio
+from concurrent.futures import ThreadPoolExecutor
 import codecs
 import fnmatch
 import os
@@ -409,6 +411,27 @@ def _scan_range(f, encoding: str, cap: int, start: int, end: int):
     return "".join(pieces), lines_seen, exact, truncated, last
 
 
+# --- Reads starved behind scans (sxrep_TCWAAH5ATMFH) ----------------------------
+# read, list and search all ran in asyncio's default thread pool (5 to 8 threads
+# on a small VPS), and a recursive search had no time limit. A thread can't be
+# cancelled, so a search the hub had stopped waiting for (it gives up at 60 s,
+# and ChatGPT then re-issues the call) kept scanning and held its thread; a few
+# of them filled the pool and small reads queued for minutes. Fleet-wide over
+# 24 h: 3,503 searches and 560 reads without an answer. Two fixes:
+#   - a time budget below the hub's wait for search and recursive list: they
+#     return what they found so far, truncated with truncated_reason
+#     "time_budget", instead of scanning on for nobody;
+#   - separate thread pools, so a read never waits behind a scan.
+FILEOPS_TIME_BUDGET_SECONDS = 50.0
+_BUDGET_CHECK_EVERY_LINES = 4096
+_READ_POOL = ThreadPoolExecutor(max_workers=4, thread_name_prefix="sx-read")
+_SCAN_POOL = ThreadPoolExecutor(max_workers=4, thread_name_prefix="sx-scan")
+
+
+async def _run_in(pool: ThreadPoolExecutor, fn, payload):
+    return await asyncio.get_running_loop().run_in_executor(pool, fn, payload)
+
+
 def make_read_handler(policy: Policy):
     """Return an async handler for the `read` op bound to the policy."""
 
@@ -609,7 +632,7 @@ def make_read_handler(policy: Policy):
         plane, and no per-request thread is created. HandlerError raised
         in the worker propagates unchanged.
         """
-        return await asyncio.to_thread(_read_blocking, payload)
+        return await _run_in(_READ_POOL, _read_blocking, payload)
 
     return handle_read
 
@@ -684,10 +707,12 @@ def make_list_handler(policy: Policy):
         cap = policy.file_ops_max_list_entries
         entries: list[dict[str, Any]] = []
         truncated = False
+        timed_out = False
+        deadline = time.monotonic() + FILEOPS_TIME_BUDGET_SECONDS
 
         def add_entry(entry_path: Path, depth_remaining: int) -> bool:
             """Walk one level. Returns True if cap reached (stop)."""
-            nonlocal truncated
+            nonlocal truncated, timed_out
             try:
                 children = sorted(
                     entry_path.iterdir(),
@@ -702,6 +727,9 @@ def make_list_handler(policy: Policy):
                 return False
 
             for child in children:
+                if time.monotonic() > deadline:
+                    timed_out = True
+                    return True
                 name = child.name
                 if not show_hidden and name.startswith("."):
                     continue
@@ -736,13 +764,22 @@ def make_list_handler(policy: Policy):
 
         add_entry(resolved, depth)
 
-        return {
+        out = {
             "ok": True,
             "path": str(resolved),
             "entries": entries,
             "total": len(entries),
-            "truncated": truncated,
+            "truncated": truncated or timed_out,
         }
+        if timed_out:
+            out["truncated_reason"] = "time_budget"
+            out["note"] = (
+                f"Stopped after {FILEOPS_TIME_BUDGET_SECONDS:.0f} s; these are the "
+                "entries found so far. Narrow the path, depth or glob for the rest."
+            )
+        elif truncated:
+            out["truncated_reason"] = "max_entries"
+        return out
 
     async def handle_list(payload: dict[str, Any]) -> dict[str, Any]:
         """Run the blocking enumeration off the event loop (issue #25).
@@ -752,7 +789,7 @@ def make_list_handler(policy: Policy):
         bounded pool instead of stalling every other coroutine for the
         duration of the traversal.
         """
-        return await asyncio.to_thread(_list_blocking, payload)
+        return await _run_in(_SCAN_POOL, _list_blocking, payload)
 
     return handle_list
 
@@ -850,11 +887,16 @@ def make_search_handler(policy: Policy):
         matches: list[dict[str, Any]] = []
         files_searched = 0
         truncated = False
+        timed_out = False
+        deadline = time.monotonic() + FILEOPS_TIME_BUDGET_SECONDS
 
         def walk(p: Path) -> bool:
             """Walk a directory or single file. Returns True when cap reached."""
-            nonlocal files_searched, truncated
+            nonlocal files_searched, truncated, timed_out
 
+            if time.monotonic() > deadline:
+                timed_out = True
+                return True
             try:
                 p_st = _stat_safe(p)
                 if p_st is None:
@@ -898,6 +940,11 @@ def make_search_handler(policy: Policy):
                         for lineno, line in enumerate(
                             _iter_search_lines(f), start=1
                         ):
+                            # one huge file must not eat the whole budget
+                            if (lineno % _BUDGET_CHECK_EVERY_LINES == 0
+                                    and time.monotonic() > deadline):
+                                timed_out = True
+                                return True
                             m = matcher(line)
                             if m is None:
                                 continue
@@ -930,14 +977,24 @@ def make_search_handler(policy: Policy):
 
         walk(resolved)
 
-        return {
+        out = {
             "ok": True,
             "path": str(resolved),
             "pattern": pattern_str,
             "matches": matches,
             "files_searched": files_searched,
-            "truncated": truncated,
+            "truncated": truncated or timed_out,
         }
+        if timed_out:
+            out["truncated_reason"] = "time_budget"
+            out["note"] = (
+                f"Stopped after {FILEOPS_TIME_BUDGET_SECONDS:.0f} s and "
+                f"{files_searched} files; these are the matches found so far. "
+                "Narrow the path or add file_glob to search the rest."
+            )
+        elif truncated:
+            out["truncated_reason"] = "max_results"
+        return out
 
     async def handle_search(payload: dict[str, Any]) -> dict[str, Any]:
         """Run the blocking scan off the event loop (issue #25).
@@ -947,6 +1004,6 @@ def make_search_handler(policy: Policy):
         so this is where loop monopolization hurt most; it now runs in
         the default bounded executor.
         """
-        return await asyncio.to_thread(_search_blocking, payload)
+        return await _run_in(_SCAN_POOL, _search_blocking, payload)
 
     return handle_search

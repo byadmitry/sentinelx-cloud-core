@@ -3,6 +3,25 @@
 Notable changes to `sentinelx-cloud-core`. Human-readable, date-stamped
 entries; releases before 0.3.0 predate this file — see the git history.
 
+## 0.23.2 - Reads no longer starve behind scans; scans stop when nobody is waiting - 2026-09-29
+
+- Reported by dater.network (sxrep_TCWAAH5ATMFH) on 0.23.1, with measurements: small
+  reads waiting 345-608 s behind recursive searches. read, list and search all ran
+  in asyncio's default thread pool (5-8 threads on a small VPS), and search had no
+  time limit. A thread can't be cancelled, so searches the hub had stopped waiting
+  for (it gives up at 60 s; ChatGPT then re-issues the call) kept scanning and
+  holding their threads until small reads queued for minutes. Fleet-wide over 24 h:
+  3,503 searches (212 users), 560 reads and 331 lists without an answer.
+- search and recursive list now stop after FILEOPS_TIME_BUDGET_SECONDS (50 s, below
+  the hub's 60 s wait), checked per directory, per file and every 4,096 lines inside
+  a file, and return what they found so far: truncated=true,
+  truncated_reason="time_budget", and a note telling the model to narrow the path,
+  depth or glob. A cap hit now says truncated_reason="max_results"/"max_entries".
+- read runs in its own pool (_READ_POOL, 4 threads) and list/search in another
+  (_SCAN_POOL, 4 threads), so a read never waits behind a scan.
+- 6 tests (a read answers in <0.5 s with every scan thread busy); 5 sabotages
+  caught. The event-loop responsiveness tests from #25 still pass.
+
 ## 0.23.1 - Windows: the refused instance can read who holds the lock - 2026-09-28
 
 - Verified on a real Windows 11 host: a second instance exits with code 3, and
