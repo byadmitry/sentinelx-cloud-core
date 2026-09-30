@@ -72,9 +72,9 @@ NOT scheduling anything else — including the WebSocket control plane
 So each op is written as a plain synchronous `_*_blocking` function
 holding all of the policy, traversal and bounding logic, and the async
 handler is a thin wrapper that hands it to a dedicated thread pool
-(_READ_POOL for read, _SCAN_POOL for list/search; see sxrep_TCWAAH5ATMFH). That is
-the default executor: a bounded, shared thread pool, so no dedicated
-thread is created per request. Semantics are unchanged — the same
+(_READ_POOL for read, _SCAN_POOL for list/search; see sxrep_TCWAAH5ATMFH).
+Both are small bounded pools, so no thread is created per request, and a
+read never waits behind a scan. Semantics are unchanged — the same
 function body, the same HandlerError propagation, the same response
 shape — only the thread it runs on differs.
 """
