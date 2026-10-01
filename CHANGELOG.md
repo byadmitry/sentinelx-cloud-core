@@ -3,6 +3,28 @@
 Notable changes to `sentinelx-cloud-core`. Human-readable, date-stamped
 entries; releases before 0.3.0 predate this file — see the git history.
 
+## 0.23.3 - A job that finishes after a reconnect delivers its result without waiting for another one - 2026-10-01
+
+- Reported by FalconZip on issue #38, with an isolated reproduction against the
+  real method bodies: a background job sends its completion on the socket it
+  started on. If that socket died and the replacement connection had already run
+  its one opening replay, the result was recorded to disk and stayed there until
+  the NEXT disconnect, while the agent sat healthy and connected; the hub saw an
+  orphaned job.
+- The live connection is tracked. When a job can't send on its own dead socket,
+  the held results are replayed on the live connection at once; and every
+  heartbeat also replays whatever is held, which covers any other ordering.
+- One replay at a time (a lock), and a replay skips a result whose own job is
+  sending it at that moment, so nothing goes out twice. The job id of a held
+  event lives under data (the first version of this change looked for it at the
+  top level and its guard never fired; the existing replay test's fixture showed
+  the real shape).
+- Not in this change: clearing a held result only once the hub acknowledges it
+  (send success is not acceptance), and agent-side digests. Both need a protocol
+  change and belong to the result-durability design.
+- 5 tests (FalconZip's ordering, the heartbeat drain, no double send); 4 sabotages
+  caught.
+
 ## 0.23.2 - Reads no longer starve behind scans; scans stop when nobody is waiting - 2026-09-29
 
 - Reported by dater.network (sxrep_TCWAAH5ATMFH) on 0.23.1, with measurements: small

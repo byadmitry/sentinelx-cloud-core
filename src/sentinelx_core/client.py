@@ -433,6 +433,7 @@ class HubClient:
             # 3. Deliver results whose own connection did not survive them.
             # Before the read loop, so an operator waiting on an answer from
             # before the interruption gets it as soon as we are back.
+            self._result_state()["current_ws"] = ws
             await self._replay_pending_results(ws)
 
             # 4. Concurrent loops: read messages, send heartbeat
@@ -456,6 +457,9 @@ class HubClient:
                 # Always await both connection-loop tasks so a simultaneous
                 # transport failure cannot leave an exception un-retrieved.
                 await asyncio.gather(read_task, heartbeat_task, return_exceptions=True)
+                state = self._result_state()
+                if state["current_ws"] is ws:
+                    state["current_ws"] = None
 
     async def _read_loop(self, ws: websockets.WebSocketClientProtocol) -> None:
         async for raw in ws:
@@ -555,22 +559,45 @@ class HubClient:
 
         Never raises. A replay failure must not stop a session from starting --
         the results stay on disk for the next one.
+
+        Runs after welcome, on every heartbeat, and right after a job fails to
+        send on its own (dead) socket. One replay at a time, and it skips a
+        result whose job is sending it right now, so nothing goes out twice.
         """
-        try:
-            waiting = list(pending_results.drain(self._executor.upload_base))
-        except Exception:  # noqa: BLE001
-            logger.exception("could not read pending results")
-            return
-        if not waiting:
-            return
-        logger.info("replaying %d result(s) held from an earlier session", len(waiting))
-        for path, event in waiting:
+        state = self._result_state()
+        async with state["replay_lock"]:
             try:
-                await ws.send(json.dumps(event, default=str))
+                waiting = [
+                    (path, event)
+                    for path, event in pending_results.drain(self._executor.upload_base)
+                    if _held_job_id(event) not in state["sending"]
+                ]
             except Exception:  # noqa: BLE001
-                logger.warning("replay failed for %s; keeping it", path.name)
-                return  # the socket is gone again; stop and keep the rest
-            pending_results.clear(path)
+                logger.exception("could not read pending results")
+                return
+            if not waiting:
+                return
+            logger.info("replaying %d held result(s)", len(waiting))
+            for path, event in waiting:
+                try:
+                    await ws.send(json.dumps(event, default=str))
+                except Exception:  # noqa: BLE001
+                    logger.warning("replay failed for %s; keeping it", path.name)
+                    return  # the socket is gone again; stop and keep the rest
+                pending_results.clear(path)
+
+    def _result_state(self) -> dict:
+        """Per-client state for result delivery, created on first use.
+
+        Lazily, not in __init__: tests and other callers build the client with
+        HubClient.__new__. Holds the live connection (None between sessions),
+        the replay lock, and the job ids whose own send is in flight.
+        """
+        state = self.__dict__.get("_results_state")
+        if state is None:
+            state = {"current_ws": None, "replay_lock": asyncio.Lock(), "sending": set()}
+            self.__dict__["_results_state"] = state
+        return state
 
     async def _start_background_job(
         self,
@@ -648,11 +675,21 @@ class HubClient:
         except Exception:  # noqa: BLE001
             logger.exception("could not record pending result for %s", job_id)
 
+        state = self._result_state()
+        state["sending"].add(job_id)
         try:
             await ws.send(event.model_dump_json())
         except Exception:  # noqa: BLE001
             logger.exception("failed to emit job_completed for %s", job_id)
-            return  # leave it on disk; the next connection carries it
+            state["sending"].discard(job_id)
+            # It's on disk. If a newer connection is already up, its opening
+            # replay may have run before this job finished: deliver it there now
+            # instead of waiting for a heartbeat (issue #38, FalconZip).
+            current = state["current_ws"]
+            if current is not None and current is not ws:
+                await self._replay_pending_results(current)
+            return
+        state["sending"].discard(job_id)
         pending_results.clear(pending_path)
 
     async def _handle_request(
@@ -797,6 +834,16 @@ class HubClient:
             await asyncio.sleep(HEARTBEAT_INTERVAL_SECONDS)
             ping = PingMessage(timestamp=datetime.now(timezone.utc))
             await ws.send(ping.model_dump_json())
+            # A result can land on disk after this connection's opening replay
+            # (its job finished on the socket it started on, which had died), and
+            # nothing else would look until the next disconnect. Never raises.
+            await self._replay_pending_results(ws)
+
+
+def _held_job_id(event: dict) -> str | None:
+    """The job id of a held job_completed event: it lives under ``data``."""
+    data = event.get("data")
+    return (data or {}).get("job_id") if isinstance(data, dict) else event.get("job_id")
 
 
 def _close_reason(exc: ConnectionClosed) -> str:
