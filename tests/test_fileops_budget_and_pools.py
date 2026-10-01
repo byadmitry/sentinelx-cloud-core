@@ -116,3 +116,71 @@ async def test_a_read_answers_while_every_scan_thread_is_busy(tmp_path):
     finally:
         for f in busy:
             f.result()
+
+
+# --- issue #53: the budget counts the wait for a scan worker ------------------------------
+
+import asyncio  # noqa: E402
+
+
+def _occupy_scan_pool(seconds: float):
+    return [F._SCAN_POOL.submit(time.sleep, seconds) for _ in range(F._SCAN_POOL._max_workers)]
+
+
+@pytest.mark.parametrize("op, payload", [
+    ("search", {"pattern": "needle"}),
+    ("list", {"depth": 2}),
+])
+async def test_a_scan_queued_past_its_budget_does_not_start(tmp_path, monkeypatch, op, payload):
+    # FalconZip's reproduction: four busy workers, a fifth scan. Before, it got a
+    # fresh budget once a worker freed up and finished untruncated.
+    (tmp_path / "a.txt").write_text("needle\n")
+    monkeypatch.setattr(F, "FILEOPS_TIME_BUDGET_SECONDS", 0.1)
+    busy = _occupy_scan_pool(0.3)
+    try:
+        handlers = build_registry(policy=_policy(tmp_path))
+        out = await handlers[op]({"path": str(tmp_path), **payload})
+    finally:
+        for f in busy:
+            f.result()
+    assert out["truncated"] is True and out["truncated_reason"] == "time_budget"
+    assert out["not_started"] is True and "did not start" in out["note"]
+    assert out.get("files_searched", 0) == 0 and out.get("total", 0) == 0
+
+
+async def test_a_scan_that_gets_a_worker_in_time_still_runs(tmp_path, monkeypatch):
+    (tmp_path / "a.txt").write_text("needle\n")
+    monkeypatch.setattr(F, "FILEOPS_TIME_BUDGET_SECONDS", 2.0)
+    busy = _occupy_scan_pool(0.2)
+    try:
+        handlers = build_registry(policy=_policy(tmp_path))
+        out = await handlers["search"]({"path": str(tmp_path), "pattern": "needle"})
+    finally:
+        for f in busy:
+            f.result()
+    assert out["truncated"] is False and len(out["matches"]) == 1 and "not_started" not in out
+
+
+async def test_a_scan_cancelled_while_queued_never_walks(tmp_path, monkeypatch):
+    (tmp_path / "a.txt").write_text("needle\n")
+    walked = []
+    real = Path.iterdir
+
+    def spy(self):
+        walked.append(self)
+        return real(self)
+
+    monkeypatch.setattr(Path, "iterdir", spy)
+    busy = _occupy_scan_pool(0.4)
+    try:
+        handlers = build_registry(policy=_policy(tmp_path))
+        task = asyncio.create_task(handlers["search"]({"path": str(tmp_path), "pattern": "needle"}))
+        await asyncio.sleep(0.05)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    finally:
+        for f in busy:
+            f.result()
+    time.sleep(0.1)          # a worker is free now; a scan that wasn't cancelled would run
+    assert walked == []

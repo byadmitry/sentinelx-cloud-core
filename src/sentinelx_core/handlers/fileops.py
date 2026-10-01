@@ -85,6 +85,7 @@ import asyncio
 from concurrent.futures import ThreadPoolExecutor
 import codecs
 import fnmatch
+import functools
 import os
 import re
 import stat
@@ -432,6 +433,23 @@ async def _run_in(pool: ThreadPoolExecutor, fn, payload):
     return await asyncio.get_running_loop().run_in_executor(pool, fn, payload)
 
 
+def _scan_deadline() -> float:
+    """The budget starts when the request arrives, not when a worker frees up.
+
+    Issue #53 (FalconZip): with the deadline set inside the worker, a scan that
+    waited for one of the four scan workers got a fresh 50 s after the wait, so
+    queue time plus traversal could pass the hub's 60 s. Passed to the worker as
+    an argument, never through the payload, which a caller controls.
+    """
+    return time.monotonic() + FILEOPS_TIME_BUDGET_SECONDS
+
+
+_NOT_STARTED_NOTE = (
+    "Other scans kept every scan worker busy until the time budget ran out, so "
+    "this one did not start. Retry it, or narrow the path or glob."
+)
+
+
 def make_read_handler(policy: Policy):
     """Return an async handler for the `read` op bound to the policy."""
 
@@ -645,7 +663,7 @@ def make_read_handler(policy: Policy):
 def make_list_handler(policy: Policy):
     """Return an async handler for the `list` op bound to the policy."""
 
-    def _list_blocking(payload: dict[str, Any]) -> dict[str, Any]:
+    def _list_blocking(payload: dict[str, Any], deadline: float | None = None) -> dict[str, Any]:
         """List directory contents. BLOCKING — runs in a worker thread.
 
         Payload:
@@ -708,7 +726,12 @@ def make_list_handler(policy: Policy):
         entries: list[dict[str, Any]] = []
         truncated = False
         timed_out = False
-        deadline = time.monotonic() + FILEOPS_TIME_BUDGET_SECONDS
+        if deadline is None:
+            deadline = _scan_deadline()
+        if time.monotonic() > deadline:
+            return {"ok": True, "path": str(resolved), "entries": [], "total": 0,
+                    "truncated": True, "truncated_reason": "time_budget",
+                    "not_started": True, "note": _NOT_STARTED_NOTE}
 
         def add_entry(entry_path: Path, depth_remaining: int) -> bool:
             """Walk one level. Returns True if cap reached (stop)."""
@@ -789,7 +812,9 @@ def make_list_handler(policy: Policy):
         bounded pool instead of stalling every other coroutine for the
         duration of the traversal.
         """
-        return await _run_in(_SCAN_POOL, _list_blocking, payload)
+        return await _run_in(
+            _SCAN_POOL, functools.partial(_list_blocking, deadline=_scan_deadline()), payload
+        )
 
     return handle_list
 
@@ -802,7 +827,7 @@ def make_list_handler(policy: Policy):
 def make_search_handler(policy: Policy):
     """Return an async handler for the `search` op bound to the policy."""
 
-    def _search_blocking(payload: dict[str, Any]) -> dict[str, Any]:
+    def _search_blocking(payload: dict[str, Any], deadline: float | None = None) -> dict[str, Any]:
         """Recursive content search. BLOCKING — runs in a worker thread.
 
         Payload:
@@ -888,7 +913,13 @@ def make_search_handler(policy: Policy):
         files_searched = 0
         truncated = False
         timed_out = False
-        deadline = time.monotonic() + FILEOPS_TIME_BUDGET_SECONDS
+        if deadline is None:
+            deadline = _scan_deadline()
+        if time.monotonic() > deadline:
+            return {"ok": True, "path": str(resolved), "pattern": pattern_str,
+                    "matches": [], "files_searched": 0,
+                    "truncated": True, "truncated_reason": "time_budget",
+                    "not_started": True, "note": _NOT_STARTED_NOTE}
 
         def walk(p: Path) -> bool:
             """Walk a directory or single file. Returns True when cap reached."""
@@ -1004,6 +1035,8 @@ def make_search_handler(policy: Policy):
         so this is where loop monopolization hurt most; it now runs in
         the default bounded executor.
         """
-        return await _run_in(_SCAN_POOL, _search_blocking, payload)
+        return await _run_in(
+            _SCAN_POOL, functools.partial(_search_blocking, deadline=_scan_deadline()), payload
+        )
 
     return handle_search

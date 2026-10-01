@@ -3,6 +3,24 @@
 Notable changes to `sentinelx-cloud-core`. Human-readable, date-stamped
 entries; releases before 0.3.0 predate this file — see the git history.
 
+## 0.23.4 - The scan budget counts the wait for a worker - 2026-10-01
+
+- Reported by FalconZip on issue #53, reproduced against 9a01337 with the real
+  handlers and pool: 0.23.2's 50 s budget for search and recursive list started
+  inside the worker, so a scan queued behind the four scan workers got a fresh
+  budget once one freed up. Queue time plus traversal could still pass the hub's
+  60 s wait, which is what the budget was for.
+- The deadline is now set when the request arrives and passed to the worker as an
+  argument (never through the payload, which a caller controls). A scan that
+  reaches a worker with its budget already spent doesn't walk at all: it returns
+  truncated, truncated_reason "time_budget", not_started=true and a note to retry
+  or narrow the path, instead of being granted another 50 s.
+- Cancelling a scan while it is still queued already kept it from running; a
+  test now pins that.
+- 4 tests (a fifth scan behind four busy workers, for search and list; one that
+  gets a worker in time and runs; queued cancellation never walks); the sabotage
+  that moves the deadline back into the worker fails both queue tests.
+
 ## 0.23.3 - A job that finishes after a reconnect delivers its result without waiting for another one - 2026-10-01
 
 - Reported by FalconZip on issue #38, with an isolated reproduction against the
