@@ -205,6 +205,39 @@ class Executor:
                     "details": exc.details,
                 },
             }
+        except PermissionError as exc:
+            # The policy allowed the path, but the OS user the agent runs as
+            # can't reach it (a parent without +x, a file without +r). That is a
+            # refusal like any other, not a crash: sxrep_TQ2C9Y22MWJP, a delete
+            # under an untraversable parent logged "executor crashed on delete".
+            # Caught here, once, for every handler.
+            duration_ms = int((time.perf_counter() - start) * 1000)
+            path = exc.filename or ""
+            if path:
+                message = (
+                    f"permission denied: {path!r}: the agent's OS user can't access "
+                    "this path, even though the policy allows it. Check the Unix "
+                    "permissions of the path and of its parent directories."
+                )
+            else:
+                message = (
+                    "permission denied: the agent's OS user can't access a path this "
+                    "operation needs, even though the policy allows it."
+                )
+            local_audit.record(
+                request.op, request.payload, ok=False,
+                error=message, duration_ms=duration_ms,
+            )
+            return {
+                "type": "response",
+                "id": request.id,
+                "ok": False,
+                "error": {
+                    "code": "permission_denied",
+                    "message": message,
+                    "details": {"path": path} if path else {},
+                },
+            }
 
 
 class HandlerError(Exception):

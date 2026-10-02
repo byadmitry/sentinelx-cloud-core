@@ -3,6 +3,25 @@
 Notable changes to `sentinelx-cloud-core`. Human-readable, date-stamped
 entries; releases before 0.3.0 predate this file — see the git history.
 
+## 0.23.5 - systemd validation works; a permission error is a refusal, not a crash - 2026-10-02
+
+- validator_preset=systemd could never pass (sxrep_NQE9F1SJHP71, on 0.23.4): safe-edit
+  verified its temp file, <name>.<random>, and systemd-analyze refuses any name it
+  doesn't recognize ('Failed to prepare filename ...: Invalid argument'), for unit
+  files as much as for drop-ins. Units are now verified as a copy with their exact
+  name in a private directory (sx-verify-*, removed afterwards). A drop-in or any
+  other file is refused before it is touched (validator_unsupported) with the way
+  to check it instead (daemon-reload, systemctl cat/show): systemd-analyze can't
+  verify a drop-in on its own, and verifying the unit with the drop-in in place
+  only warns about invalid values and still exits 0. The preset catches what
+  systemd-analyze refuses; values systemd merely ignores still pass.
+- A PermissionError from any handler is now answered as permission_denied, with
+  the path, instead of 'executor crashed' (sxrep_TQ2C9Y22MWJP: delete on a path the
+  policy allows, under a parent the agent's OS user can't traverse). Caught once in
+  the executor, so move, copy, chmod and chown, which had the same unguarded
+  exists() checks, are covered too.
+- 7 tests (the systemd ones use the real systemd-analyze); 4 sabotages caught.
+
 ## 0.23.4 - The scan budget counts the wait for a worker - 2026-10-01
 
 - Reported by FalconZip on issue #53, reproduced against 9a01337 with the real

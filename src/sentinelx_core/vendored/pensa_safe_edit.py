@@ -333,6 +333,27 @@ def build_validator_preset(preset: str, target: Path) -> list[str]:
     )
 
 
+# systemd decides what a file is by its name. systemd-analyze verify refuses
+# any other name ("Failed to prepare filename ...: Invalid argument"), so the
+# temp file (<name>.<random>) could never be verified, and a drop-in (.conf)
+# can't be verified on its own at all (sxrep_NQE9F1SJHP71). Verifying the unit
+# with its drop-in in place isn't a usable check either: invalid values only
+# warn and verify still exits 0. So: units are verified as an exact-name copy
+# in a private directory; anything else is refused before it is touched.
+SYSTEMD_UNIT_SUFFIXES = frozenset({
+    ".service", ".socket", ".device", ".mount", ".automount", ".swap",
+    ".target", ".path", ".timer", ".slice", ".scope",
+})
+
+SYSTEMD_UNSUPPORTED_MESSAGE = (
+    "validator_preset=systemd verifies unit files (.service, .socket, .timer "
+    "and the other unit types) with systemd-analyze, which can't check a "
+    "drop-in or any other file on its own. Nothing was changed. Apply the edit "
+    "without the validator, then run systemctl daemon-reload and check the unit "
+    "with systemctl cat and systemctl show."
+)
+
+
 def build_validator(
     cmd: str | None, preset: str | None, target: Path
 ) -> list[str] | None:
@@ -630,21 +651,32 @@ def apply_edit(spec: EditSpec) -> EditResult:
             result.chown_skipped = meta.chown_skipped
             result.chown_skip_reason = meta.chown_skip_reason
 
-        validator_argv = build_validator(
-            spec.validator, spec.validator_preset, tmp_path
-        )
-        if validator_argv:
-            result.validator = validator_argv
-            proc = run_argv(validator_argv)
-            if proc.returncode != 0:
-                detail = (proc.stdout or "").strip()
-                err = (proc.stderr or "").strip()
-                tail = " / ".join(x for x in (detail, err) if x)
-                raise SafeEditError(
-                    "validation_failed",
-                    "validation failed"
-                    + (f": {tail}" if tail else ""),
-                )
+        validate_path, verify_dir = tmp_path, None
+        if spec.validator_preset == "systemd":
+            if target.suffix not in SYSTEMD_UNIT_SUFFIXES:
+                raise SafeEditError("validator_unsupported", SYSTEMD_UNSUPPORTED_MESSAGE)
+            verify_dir = tempfile.mkdtemp(prefix="sx-verify-")
+            validate_path = Path(verify_dir) / target.name
+            shutil.copyfile(tmp_path, validate_path)
+        try:
+            validator_argv = build_validator(
+                spec.validator, spec.validator_preset, validate_path
+            )
+            if validator_argv:
+                result.validator = validator_argv
+                proc = run_argv(validator_argv)
+                if proc.returncode != 0:
+                    detail = (proc.stdout or "").strip()
+                    err = (proc.stderr or "").strip()
+                    tail = " / ".join(x for x in (detail, err) if x)
+                    raise SafeEditError(
+                        "validation_failed",
+                        "validation failed"
+                        + (f": {tail}" if tail else ""),
+                    )
+        finally:
+            if verify_dir:
+                shutil.rmtree(verify_dir, ignore_errors=True)
 
         if spec.diff:
             result.diff_text = show_diff(target, tmp_path)
