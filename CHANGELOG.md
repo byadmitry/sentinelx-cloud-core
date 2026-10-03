@@ -3,6 +3,27 @@
 Notable changes to `sentinelx-cloud-core`. Human-readable, date-stamped
 entries; releases before 0.3.0 predate this file — see the git history.
 
+## 0.23.6 - An edit never hands a file to the agent's user - 2026-10-03
+
+- Reported by m.schiemann (sxrep_916B3X4TFK4K) on 0.23.4: edits in a user's project
+  replaced its files with files owned by the agent's user. For a mode-660 test
+  file that took away its owner's read access, and the user's tests failed with
+  PermissionError.
+- safe-edit writes a temp file and renames it over the target. Running
+  unprivileged, the agent can't chown the temp file to the original owner;
+  copy_metadata recorded that (chown_skipped) and the rename went ahead anyway.
+  Now, when the owner can't be kept, the new content goes into the existing
+  file instead (same inode: owner, group, mode and ACLs stay), as editors do.
+  The backup is taken before that write. When chown works, or on Windows (no
+  POSIX owner), the atomic rename is unchanged. Edits and backup restores both
+  go through the same path.
+- A file the agent's user can't write is now refused (not_writable) and left
+  untouched; before, the rename replaced it through the directory's permission.
+- The output says 'written in place to keep the file's owner, group and
+  permissions' instead of 'chown_skipped'.
+- 6 tests (chown made to fail, since the suite runs as root); the existing
+  chown-skip test moved to the new contract; 4 sabotages caught.
+
 ## 0.23.5 - systemd validation works; a permission error is a refusal, not a crash - 2026-10-02
 
 - validator_preset=systemd could never pass (sxrep_NQE9F1SJHP71, on 0.23.4): safe-edit

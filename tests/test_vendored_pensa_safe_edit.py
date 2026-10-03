@@ -222,9 +222,13 @@ def test_apply_edit_surfaces_chown_skip(
         raise PermissionError(1, "Operation not permitted")
 
     monkeypatch.setattr(os, "chown", boom)
+    inode = f.stat().st_ino
     res = apply_edit(EditSpec(path=str(f), mode="write", new="b"))
     assert res.ok is True  # the edit still succeeds
-    assert res.chown_skipped is True  # but the skip is visible
+    # and the owner is no longer lost: the content goes into the same file
+    # (sxrep_916B3X4TFK4K), so there is no skip left to report.
+    assert res.in_place is True and res.chown_skipped is False
+    assert f.stat().st_ino == inode
     assert f.read_text() == "b"
 
 

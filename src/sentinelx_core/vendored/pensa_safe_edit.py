@@ -333,6 +333,47 @@ def build_validator_preset(preset: str, target: Path) -> list[str]:
     )
 
 
+def _install(tmp_path: Path, target: Path, result: "EditResult") -> None:
+    """Put the new content at target without changing who owns it.
+
+    The atomic path (os.replace) puts a new file in place, owned by the agent's
+    user. When copy_metadata couldn't give it the original owner (the agent
+    isn't root and doesn't own the file), that rename handed the file to the
+    agent: sxrep_916B3X4TFK4K, a mode-660 test file of user micha ended up
+    owned by sentinelx and micha could no longer read it. In that case write
+    the new content into the existing file instead, as editors do when they
+    can't keep the owner: same inode, so owner, group, mode and ACLs stay. It
+    isn't atomic, but the backup was taken before this point.
+
+    Windows has no POSIX owner (copy_metadata always reports the skip there);
+    the rename keeps working as before.
+    """
+    ownership_lost = (
+        result.chown_skipped
+        and hasattr(os, "chown")
+        and target.exists()
+        and not target.is_symlink()
+    )
+    if not ownership_lost:
+        os.replace(tmp_path, target)
+        return
+    try:
+        dst = open(target, "r+b")
+    except PermissionError as exc:
+        raise SafeEditError(
+            "not_writable",
+            f"{target} is not writable by the agent's user, and replacing it "
+            "would hand the file to that user; nothing was changed",
+        ) from exc
+    with dst, open(tmp_path, "rb") as src:
+        dst.write(src.read())
+        dst.truncate()
+        dst.flush()
+        os.fsync(dst.fileno())
+    result.in_place = True
+    result.chown_skipped = False  # the original owner, group and mode are kept
+
+
 # systemd decides what a file is by its name. systemd-analyze verify refuses
 # any other name ("Failed to prepare filename ...: Invalid argument"), so the
 # temp file (<name>.<random>) could never be verified, and a drop-in (.conf)
@@ -453,6 +494,7 @@ class EditResult:
     dry_run: bool = False
     chown_skipped: bool = False
     chown_skip_reason: str = ""
+    in_place: bool = False
     messages: list[str] = field(default_factory=list)
 
 
@@ -570,7 +612,7 @@ def _do_restore(spec: EditSpec) -> EditResult:
             result.backup_before_restore = str(
                 make_backup(target, backup_dir)
             )
-        os.replace(tmp_path, target)
+        _install(tmp_path, target, result)
         return result
     except SafeEditError:
         raise
@@ -686,7 +728,7 @@ def apply_edit(spec: EditSpec) -> EditResult:
             return result
 
         result.backup = str(make_backup(target, backup_dir))
-        os.replace(tmp_path, target)
+        _install(tmp_path, target, result)
         return result
     except SafeEditError:
         raise
@@ -727,7 +769,9 @@ def _render_result(result: EditResult) -> None:
                     "BACKUP_BEFORE_RESTORE: "
                     f"{result.backup_before_restore}"
                 )
-        if result.chown_skipped:
+        if result.in_place:
+            print("METADATA: written in place to keep the file's owner, group and permissions")
+        elif result.chown_skipped:
             print(f"METADATA: chown_skipped ({result.chown_skip_reason})")
         return
 
@@ -737,7 +781,9 @@ def _render_result(result: EditResult) -> None:
         print(f"CHANGES: {result.changed}")
         if result.validator:
             print(f"VALIDATOR: {' '.join(result.validator)}")
-        if result.chown_skipped:
+        if result.chown_skipped and hasattr(os, "chown"):
+            print("METADATA: a real run writes in place, to keep the file's owner, group and permissions")
+        elif result.chown_skipped:
             print(f"METADATA: chown_skipped ({result.chown_skip_reason})")
         return
 
@@ -746,7 +792,9 @@ def _render_result(result: EditResult) -> None:
     print(f"CHANGES: {result.changed}")
     if result.validator:
         print(f"VALIDATOR: {' '.join(result.validator)}")
-    if result.chown_skipped:
+    if result.in_place:
+        print("METADATA: written in place to keep the file's owner, group and permissions")
+    elif result.chown_skipped:
         print(f"METADATA: chown_skipped ({result.chown_skip_reason})")
 
 
