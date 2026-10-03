@@ -71,9 +71,14 @@ def test_the_helper_preserves_flags_the_caller_already_set(monkeypatch):
     assert out["creationflags"] == (0x00000200 | winspawn.CREATE_NO_WINDOW)
 
 
-def test_the_helper_changes_nothing_off_windows(monkeypatch):
+def test_off_windows_the_helper_only_adds_the_priority_reset(monkeypatch):
+    # Off Windows nothing about consoles changes; the one addition is the
+    # preexec_fn that drops the agent's raised priority in children
+    # (sxrep_E6VEFQ602FAF). The caller's own arguments come back untouched.
     monkeypatch.setattr(winspawn.sys, "platform", "linux")
-    assert winspawn.spawn_kwargs(stdout=1) == {"stdout": 1}
+    kw = winspawn.spawn_kwargs(stdout=1)
+    assert kw.pop("preexec_fn") is winspawn._shed_agent_priority
+    assert kw == {"stdout": 1}
 
 
 def test_the_nested_powershell_is_hidden_too():

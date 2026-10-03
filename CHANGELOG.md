@@ -3,6 +3,27 @@
 Notable changes to `sentinelx-cloud-core`. Human-readable, date-stamped
 entries; releases before 0.3.0 predate this file — see the git history.
 
+## 0.23.7 - What the agent starts no longer inherits its priority and OOM protection - 2026-10-03
+
+- Reported by exceltransportpl (sxrep_E6VEFQ602FAF) on 0.23.4: processes started
+  through SentinelX stay in the agent's cgroup and inherit what systemd grants the
+  agent, Nice=-5 and OOMScoreAdjust=-500. On that host ~20 GB of project processes
+  carried the agent's OOM protection, so the kernel would kill everything else
+  first.
+- spawn_kwargs (the one helper every spawn site uses: exec, script_run, edit, git,
+  local_api, project_snapshot) now adds a preexec_fn on POSIX that sets the child's
+  nice back to 0 and its oom_score_adj back to 0 when they are negative. Raising
+  both needs no privilege. A positive nice set by the operator is kept, and a
+  caller's own preexec_fn still runs. The function uses plain syscalls only
+  (preexec_fn runs between fork and exec).
+- Paired with the installer setting KillMode=process (sentinelx-cloud-installer
+  3373945), so stopping or restarting the agent no longer kills those processes.
+  Isolating them in their own cgroup needs root (systemd-run) and is left to the
+  operator.
+- 5 tests with real processes (a stand-in agent with the unit's values; a control
+  without the helper shows the child inheriting -5/-500); the off-Windows test of
+  spawn_kwargs moved to the new contract; 3 sabotages caught.
+
 ## 0.23.6 - An edit never hands a file to the agent's user - 2026-10-03
 
 - Reported by m.schiemann (sxrep_916B3X4TFK4K) on 0.23.4: edits in a user's project
