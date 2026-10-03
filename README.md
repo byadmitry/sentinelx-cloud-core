@@ -55,6 +55,14 @@ ChatGPT users can connect it in one click, no custom MCP URL required.
 This repo is also the agent's source — read on if you want to audit or
 contribute.
 
+## Troubleshooting
+
+Common errors and their fixes, each under the exact message you'll see, are on
+[sentinelx.app/troubleshooting](https://sentinelx.app/troubleshooting): sign-in
+failing behind antivirus MCP scanning, hosts that keep reconnecting, `-32603`
+errors during a hub update, ChatGPT safety blocks, Manus setup and agents that
+stay offline. If none of them matches, open an issue here.
+
 ## Architecture
 
 ```
