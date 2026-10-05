@@ -3,6 +3,18 @@
 Notable changes to `sentinelx-cloud-core`. Human-readable, date-stamped
 entries; releases before 0.3.0 predate this file — see the git history.
 
+## 0.23.8 - The local audit keeps what was done, not the bytes moved - 2026-10-05
+
+- Reported by chupin74 (sxrep_1G8KEZHMGKBA) on 0.11.15, still true on 0.23.7: the
+  on-host audit log stored each upload_chunk's content_base64 in full (~1.4 MB a
+  line). Retention counts lines (MAX_LINES 5000), so one host's log reached ~1.7 GB
+  in an hour; the worst case was ~7 GB.
+- local_audit.record writes a compacted copy of the payload: content_base64 becomes
+  its decoded size and SHA-256, and any text field over 64 KB its size, SHA-256 and
+  first 2 KB. Commands and scripts stay whole, nothing is redacted, and the
+  original payload is untouched.
+- 5 tests; 2 sabotages caught (without it, one chunk line is 1,398,282 bytes).
+
 ## 0.23.7 - What the agent starts no longer inherits its priority and OOM protection - 2026-10-03
 
 - Reported by exceltransportpl (sxrep_E6VEFQ602FAF) on 0.23.4: processes started

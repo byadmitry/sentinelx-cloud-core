@@ -17,9 +17,15 @@ Design constraints:
   swallowed (best-effort) — a broken log is not worth failing a real op over.
 - No redaction: entries are stored as-is. The payload may contain secrets the
   user themselves passed; that is their record on their own machine.
+- No bulk data: file bytes (content_base64) are kept as their size and SHA-256,
+  and any text field over MAX_FIELD_CHARS as its size, SHA-256 and first 2 KB.
+  Retention counts lines, and a 1.4 MB upload chunk per line grew one host's log
+  to ~1.7 GB in an hour (sxrep_1G8KEZHMGKBA). Commands and scripts stay whole.
 """
 from __future__ import annotations
 
+import base64
+import hashlib
 import json
 import logging
 import os
@@ -89,6 +95,36 @@ _checked_this_process = False
 # log; auditing the read would grow the log every time someone views it.
 SKIP_OPS = frozenset({"read_audit", "ping"})
 
+# Fields that carry file bytes rather than a description of what was done.
+_BINARY_FIELDS = frozenset({"content_base64"})
+MAX_FIELD_CHARS = 65536
+_HEAD_CHARS = 2048
+
+
+def _binary_summary(b64: str) -> dict[str, Any]:
+    try:
+        raw = base64.b64decode(b64, validate=False)
+    except Exception:  # noqa: BLE001 - keep what can be said about it
+        return {"omitted": "base64", "chars": len(b64)}
+    return {"omitted": "base64", "bytes": len(raw),
+            "sha256": hashlib.sha256(raw).hexdigest()}
+
+
+def _compact(value: Any) -> Any:
+    """A copy of a payload without bulk data; the original is left alone."""
+    if isinstance(value, dict):
+        return {
+            k: _binary_summary(v) if k in _BINARY_FIELDS and isinstance(v, str) else _compact(v)
+            for k, v in value.items()
+        }
+    if isinstance(value, list):
+        return [_compact(v) for v in value]
+    if isinstance(value, str) and len(value) > MAX_FIELD_CHARS:
+        return {"omitted": "text", "chars": len(value),
+                "sha256": hashlib.sha256(value.encode("utf-8", "replace")).hexdigest(),
+                "head": value[:_HEAD_CHARS]}
+    return value
+
 
 def record(op: str, payload: dict[str, Any], ok: bool,
            error: str | None = None, duration_ms: int | None = None,
@@ -115,7 +151,7 @@ def record(op: str, payload: dict[str, Any], ok: bool,
         entry: dict[str, Any] = {
             "timestamp": datetime.now(UTC).isoformat(timespec="seconds"),
             "op": op,
-            "payload": payload,
+            "payload": _compact(payload),
             "ok": ok,
             "error": error,
             "duration_ms": duration_ms,
