@@ -3,6 +3,20 @@
 Notable changes to `sentinelx-cloud-core`. Human-readable, date-stamped
 entries; releases before 0.3.0 predate this file — see the git history.
 
+## 0.23.9 - Oversized results keep what fits instead of becoming a note - 2026-10-06
+
+- Protocol 1.13.0 -> 1.13.1. The agent bounds every response to 128 KiB before
+  sending it, and the bounding could only shorten strings: a result whose bulk was
+  lists of small entries came back as 'result omitted: too large to bound
+  field-wise', with ok=true. Reported by dater.network (sxrep_W0RW3FVD97RJ:
+  capabilities detail=full of ~166 KB delivered as 308 bytes); in a week it hit 5
+  users, one of them 311 times.
+- With 1.13.1 the longest lists are trimmed too, keeping their first items and a
+  '\u2026[sentinelx: N more items omitted]\u2026' marker; the rest of the result arrives
+  intact. Example: a 225 KB result with 1,500 playbooks now delivers 124 KB with the
+  first 825 and the marker.
+- Agent suite: 631 passed against 1.13.1; the pinned tag installs 1.13.1 with the fix.
+
 ## 0.23.8 - The local audit keeps what was done, not the bytes moved - 2026-10-05
 
 - Reported by chupin74 (sxrep_1G8KEZHMGKBA) on 0.11.15, still true on 0.23.7: the
