@@ -3,6 +3,19 @@
 Notable changes to `sentinelx-cloud-core`. Human-readable, date-stamped
 entries; releases before 0.3.0 predate this file — see the git history.
 
+## 0.23.10 - Large capabilities really arrive trimmed now (protocol 1.13.2) - 2026-10-06
+
+- 0.23.9 (protocol 1.13.1) did not fix the reported case: a real capabilities
+  detail=full keeps services, locations and playbooks as dicts, which 1.13.1 could
+  not trim, so a host with a large config still got 'result omitted: too large to
+  bound field-wise' (sxrep_95SMJC6TJ0CE, follow-up of sxrep_W0RW3FVD97RJ).
+- Protocol 1.13.2 trims dicts as well as strings and lists (never the result's own
+  keys), inserts nothing into trimmed containers, and lists what was left out in
+  _truncation['omitted'] (JSON Pointer path, kept, omitted).
+- New test test_capabilities_full_is_bounded.py builds the response with the real
+  capabilities handler and 400 services / 13 large playbooks (171 KB): 1.13.0 and
+  1.13.1 deliver a 276-byte note, 1.13.2 a trimmed result with every top-level key.
+
 ## 0.23.9 - Oversized results keep what fits instead of becoming a note - 2026-10-06
 
 - Protocol 1.13.0 -> 1.13.1. The agent bounds every response to 128 KiB before
