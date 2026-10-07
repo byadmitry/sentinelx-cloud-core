@@ -3,6 +3,28 @@
 Notable changes to `sentinelx-cloud-core`. Human-readable, date-stamped
 entries; releases before 0.3.0 predate this file — see the git history.
 
+## Unreleased - The Linux update playbooks no longer run git in the root-owned checkout - 2026-10-07
+
+Config-only (config.example.yaml); no code change and no version bump, on purpose: the
+hub updates a host whose version differs from latest_agent_version, so a version on main
+ahead of the hub's would make sentinel_agent_update reinstall the same build in a loop.
+
+- update_sentinelx_code (Linux) ran git fetch / git pull in /opt/sentinelx-cloud-core as
+  the agent's user. The standard install keeps that checkout owned by root, so it failed
+  at the fetch (FETCH_HEAD: Permission denied) on every normal install, and an assistant
+  went on to change ownership and add safe.directory to force it (sxrep_JYGA3J9A3Z9S).
+  It now uses sentinel_agent_update (or the dashboard), says to wait rather than retry
+  when that returns not_confirmed, and says not to touch the checkout.
+- sentinelx_meta ran git log / git fetch there for the version and update check, which
+  the same ownership defeats (git refuses a repo owned by another user). It now reads
+  'version' and 'update_available' from sentinel_capabilities. Its notes no longer say
+  the checkout is owned by the sentinelx user.
+- Hosts keep the playbooks they were installed with (the installer never rewrites
+  /etc/sentinelx/config.yaml): this reaches new installs; existing hosts can copy the
+  two blocks (or use sync_sentinelx_config).
+- tests/test_config_example_update_playbooks.py: no Linux playbook step runs git inside
+  the checkout; the update playbook uses sentinel_agent_update. Fails on the old file.
+
 ## 0.23.10 - Large capabilities really arrive trimmed now (protocol 1.13.2) - 2026-10-06
 
 - 0.23.9 (protocol 1.13.1) did not fix the reported case: a real capabilities

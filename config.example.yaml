@@ -418,50 +418,25 @@ playbooks:
 
   update_sentinelx_code:
     description: |
-      Update the SentinelX agent on this host to the latest commit on main.
+      Update the SentinelX agent on this Linux host to the current release.
     when: |
       The user asks to update, upgrade, or pull the latest version of
       SentinelX on this host (e.g. "update sentinelx", "is there a new
       version of the agent?", "pull the latest"). This playbook handles
-      the AGENT CODE only — config changes are handled separately by
+      the AGENT CODE only; config changes are handled separately by
       sync_sentinelx_config.
     steps:
-      - "Check the current commit with sentinel_script_run (interpreter=bash): 'cd /opt/sentinelx-cloud-core && git log --oneline -1'. Note the SHA. This is what we'll be moving away from."
-      - "Fetch and compare with sentinel_script_run (interpreter=bash): 'cd /opt/sentinelx-cloud-core && git fetch origin main && git log HEAD..origin/main --oneline'. If the output is EMPTY, the agent is already up to date — STOP HERE and tell the user. If non-empty, summarize the incoming commits before pulling."
-      - "Check pip install mode with sentinel_script_run (interpreter=bash): '/opt/sentinelx-cloud-core/.venv/bin/pip show sentinelx-cloud-core | grep -E \"Editable|Location\"'. If 'Editable project location:' is present, the install is editable and a git pull is sufficient. If absent, pip reinstall will be required after the pull (older installs predate commit 030190c which switched the installer to editable mode)."
-      - "Check whether new dependencies are needed with sentinel_script_run (interpreter=bash): 'cd /opt/sentinelx-cloud-core && git diff HEAD..origin/main --name-only | grep -E \"pyproject|setup\\.py|setup\\.cfg|requirements\"'. If output is non-empty, pip reinstall will be needed even on editable installs (new deps to fetch). If empty, code-only update."
-      - "Pull with sentinel_script_run (interpreter=bash): 'cd /opt/sentinelx-cloud-core && git pull --ff-only origin main'. If --ff-only fails, the working tree has local changes — STOP and tell the user; this is not a routine update path and probably needs human review."
-      - "(Conditional) If step 3 said NOT editable OR step 4 found pyproject changes, reinstall with sentinel_script_run (interpreter=bash, sudo=true): '/opt/sentinelx-cloud-core/.venv/bin/pip install -e /opt/sentinelx-cloud-core'. Otherwise, skip this step."
-      - "Restart the agent. Two paths (same as add_allowed_command): (a) if sentinelx-cloud-core is declared in services: sentinel_service action='restart' service='sentinelx-cloud-core'. The WS session will drop while the agent restarts itself; this is expected. The agent reconnects to the hub automatically. (b) if NOT declared: ask the user to run on a real terminal: 'sudo systemctl restart sentinelx-cloud-core'."
-      - "Verify with sentinel_capabilities. The agent should respond and the response should reflect any new capabilities. If capabilities errors out, the new version may have a startup bug — check the journal with sentinel_exec: 'sudo journalctl -u sentinelx-cloud-core -n 30 --no-pager'."
-      - "(Optional follow-up) Mention to the user that config.example.yaml may have new playbooks, services, or commands not yet in their /etc/sentinelx/config.yaml. Offer to walk through them via the sync_sentinelx_config playbook. Don't run that automatically — the user decides whether to adopt new config defaults."
-
+      - "Tell the user the update restarts the agent, which cuts any call in flight, and agree on a moment when nothing important is running."
+      - "Run sentinel_agent_update with this host's host_id and confirm=true. It checks that the agent's user has passwordless sudo, runs the official installer with sudo, and watches for the agent to come back on the new version. If the precheck fails (sudo_unavailable, script_run_unavailable), nothing was changed: relay its next_step."
+      - "If it returns 'updated', you're done: the new version is running."
+      - "If it returns 'not_confirmed' or 'already_in_progress', the installer may still be running (on a slow host it can take 20-30 minutes). Do NOT run it again and do NOT try to update by hand meanwhile: check the agent version with list_hosts after 10-15 minutes."
+      - "If sentinel_agent_update is not available here, ask the user to run the update from Managing your agent in the SentinelX dashboard, as root on the host."
+      - "(Optional follow-up) Mention that config.example.yaml may have new playbooks, services, or commands not yet in /etc/sentinelx/config.yaml, and offer the sync_sentinelx_config playbook. Don't run it automatically."
     requires:
-      - "sudo access on /opt/sentinelx-cloud-core (set up by the installer)."
-      - "git, pip, journalctl in the allowlist (all in the default config)."
-      - "Either sentinelx-cloud-core declared in services for self-restart,
-         or operator availability for a one-time bootstrap restart on a
-         terminal."
+      - "Passwordless sudo for the agent's user and script_run enabled (for sentinel_agent_update), or the user running the installer as root."
     notes:
-      - "This playbook handles the HAPPY PATH for a recent install. It does
-         NOT handle: custom branches or forks, working trees with local
-         modifications, agent versions older than the editable-mode
-         migration with non-trivial schema changes. Those need human
-         review."
-      - "Updates to /etc/sentinelx/config.yaml are NOT handled here. The
-         user's config is independent of the repo's config.example.yaml —
-         git pull does NOT modify /etc/sentinelx/config.yaml. To pick up
-         new playbooks, services, or commands shipped in the example, use
-         sync_sentinelx_config."
-      - "Bootstrap problem: the FIRST time this playbook runs on a host
-         that didn't previously have sentinelx-cloud-core declared in
-         services, step 7(b) requires manual intervention. After that
-         one-time bootstrap, every future run goes through 7(a) without
-         operator help."
-      - "Rollback: this playbook does not handle rolling back an update.
-         If something breaks after an update, the operator can manually
-         'git reset --hard <previous-commit>' in /opt/sentinelx-cloud-core
-         and restart. That diagnostic step is intentionally human-driven."
+      - "Do NOT git fetch, git pull or pip install inside /opt/sentinelx-cloud-core as the agent's user, and do NOT change that directory's owner or add safe.directory entries to make it work: the standard install keeps the checkout owned by root on purpose, so the agent cannot rewrite its own code. Older versions of this playbook did exactly that, and it cannot work on a standard install."
+      - "Updates to /etc/sentinelx/config.yaml are NOT handled here: the installer keeps the host's config. To pick up new defaults, use sync_sentinelx_config."
 
   sync_sentinelx_config:
     description: |
@@ -745,38 +720,25 @@ playbooks:
       - "For STATIC info (repo URL, install paths, support links), the
          answer is already in the notes section of this playbook — no
          tool call needed. Just read the notes and respond."
-      - "For the INSTALLED VERSION (current commit), run:
-           cd /opt/sentinelx-cloud-core && git log -1 --format='%h %s (%ci)'
-         Output is one line: short SHA + commit message + ISO date.
-         Example: '5991315 Remove pensa-safe-edit from default allowlist
-         (2026-05-05 01:36:03 +0000)'."
-      - "For an UPDATE CHECK (is there anything newer on origin/main?),
-         run:
-           cd /opt/sentinelx-cloud-core && git fetch origin main 2>&1 \\
-              | tail -5 && git log HEAD..origin/main --oneline
-         If the second command's output is empty → up-to-date.
-         If it shows commits → those are pending updates, list them to
-         the user with their messages."
-      - "For a quick UPDATE-AVAILABLE summary (just the count behind),
-         run:
-           cd /opt/sentinelx-cloud-core && git rev-list --count HEAD..origin/main
-         Output is a single integer. 0 means up-to-date."
-      - "For the REMOTE URL (canonical source), run:
-           cd /opt/sentinelx-cloud-core && git remote get-url origin
-         Useful if the install was customized to point at a fork."
-      - "If the user wants to APPLY pending updates, hand off to the
-         update_sentinelx_code playbook. Do NOT run git pull or restart
-         from THIS playbook — separation of concerns: this playbook
-         informs, update_sentinelx_code applies."
+      - "For the INSTALLED VERSION and whether an UPDATE is available,
+         call sentinel_capabilities: 'version' is the running agent, and
+         'update_available' is present when it is behind the version the
+         hub recommends (with that version). Don't read git inside
+         /opt/sentinelx-cloud-core for this: the checkout is owned by root,
+         and git refuses to read it as the agent's user (dubious ownership),
+         let alone fetch into it."
+      - "For the CHANGELOG, point the user to
+         https://github.com/pensados/sentinelx-cloud-core/blob/main/CHANGELOG.md."
+      - "If the user wants to APPLY an update, hand off to the
+         update_sentinelx_code playbook (sentinel_agent_update). Do NOT
+         restart or update from THIS playbook: this playbook informs,
+         update_sentinelx_code applies."
       - "If the user wants to MERGE new defaults from the example into
          their /etc/sentinelx/config.yaml after updating, use the
          sync_sentinelx_config playbook."
     requires:
-      - "git in allowlist (default)."
-      - "/opt/sentinelx-cloud-core readable by the agent (default install
-         location, owned by sentinelx user)."
-      - "Network access to github.com for git fetch (otherwise update
-         checks fail; static info still works offline)."
+      - "Nothing beyond the agent itself: sentinel_capabilities reports the
+         version and update_available."
     notes:
       - "Source repo: https://github.com/pensados/sentinelx-cloud-core"
       - "Public installer: https://get.sentinelx.app (one-line curl|bash
@@ -789,10 +751,10 @@ playbooks:
       - "Hub URL: https://mcp.sentinelx.app — the central server every
          agent connects to via outbound websocket. The connector URL for
          Claude.ai / ChatGPT is https://mcp.sentinelx.app/mcp/mcp."
-      - "Install dir: /opt/sentinelx-cloud-core (managed by the
-         installer; safe to inspect, don't edit by hand — use
-         update_sentinelx_code to update or sentinel_edit for runtime
-         changes)."
+      - "Install dir: /opt/sentinelx-cloud-core (managed by the installer
+         and owned by root, so the agent cannot rewrite its own code; don't
+         edit it, pull into it or change its owner — use
+         update_sentinelx_code to update)."
       - "Config file: /etc/sentinelx/config.yaml — the policy. Allowlist,
          services, locations, playbooks all live here. Edit via
          sentinel_edit or hand-edit and restart."
@@ -802,13 +764,13 @@ playbooks:
          contents to the user."
       - "Logs: 'journalctl -u sentinelx-cloud-core -f' — live tail.
          '-n 100' for last 100 lines. Look for WARN/ERROR levels first."
-      - "If you're checking whether this host can self-update: it can,
-         iff (a) update_sentinelx_code is in playbooks, AND (b)
-         sentinelx-cloud-core is declared in services with the 'restart'
-         action. Both should be true on any default install."
+      - "If you're checking whether this host can be updated from the
+         assistant: sentinel_agent_update needs passwordless sudo for the
+         agent's user and script_run enabled. Otherwise the update is run
+         by the user from Managing your agent in the SentinelX dashboard."
       - "The PROJECT considers updates user-driven, not automatic. There
          is intentionally NO auto-update mechanism — the operator
-         decides when to pull new code, and the agent should INFORM
+         decides when to update, and the agent should INFORM
          (via this playbook) but not ACT autonomously on updates."
       - "Related meta-playbooks: add_allowed_command (extend allowlist),
          add_service (declare systemd services), create_binary_playbook
