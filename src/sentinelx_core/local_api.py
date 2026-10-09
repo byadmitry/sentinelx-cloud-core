@@ -27,9 +27,11 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import sys
-from uuid import uuid4
 from typing import Any
+from uuid import uuid4
+
 from sentinelx_core.winspawn import spawn_kwargs
 
 logger = logging.getLogger(__name__)
@@ -38,6 +40,8 @@ logger = logging.getLogger(__name__)
 # opaque to us: it can answer with anything, and a container log endpoint can
 # stream indefinitely.
 MAX_RESPONSE_BYTES = 8 * 1024 * 1024
+MAX_STDIO_RESPONSE_BYTES = 1024 * 1024
+MAX_STDIO_STDERR_BYTES = 16 * 1024
 
 
 class LocalApiError(Exception):
@@ -274,8 +278,187 @@ async def _call_via_run_as(endpoint: Any, payload: bytes) -> bytes:
     )
 
 
+def _stdio_env() -> dict[str, str]:
+    """Minimal deterministic child environment for local-api stdio endpoints."""
+    env = {
+        "PATH": os.defpath,
+        "LANG": "C.UTF-8",
+        "LC_ALL": "C.UTF-8",
+    }
+    if sys.platform == "win32":
+        for key in ("SystemRoot", "WINDIR"):
+            value = os.environ.get(key)
+            if value:
+                env[key] = value
+    return env
+
+
+async def _read_bounded_stream(
+    reader: asyncio.StreamReader | None,
+    *,
+    limit: int,
+    label: str,
+) -> bytes:
+    if reader is None:
+        return b""
+    data = bytearray()
+    while True:
+        remaining = limit + 1 - len(data)
+        chunk = await reader.read(min(65536, max(1, remaining)))
+        if not chunk:
+            return bytes(data)
+        data.extend(chunk)
+        if len(data) > limit:
+            raise LocalApiError(
+                "too_large",
+                f"{label} exceeded the {limit}-byte cap",
+            )
+
+
+async def _kill_and_wait(proc: asyncio.subprocess.Process) -> None:
+    if proc.returncode is None:
+        proc.kill()
+    try:
+        await proc.wait()
+    except ProcessLookupError:
+        pass
+
+
+async def _call_jsonrpc_stdio(endpoint: Any, payload: dict[str, Any]) -> Any:
+    """One bounded JSON-RPC exchange with a fixed executable over stdin/stdout."""
+    if endpoint.protocol != "jsonrpc":
+        raise LocalApiError(
+            "unsupported_transport_protocol",
+            f"stdio transport does not support protocol {endpoint.protocol!r}",
+        )
+    if getattr(endpoint, "run_as", None):
+        raise LocalApiError(
+            "unsupported_run_as",
+            "stdio local-api endpoints do not support run_as",
+        )
+    executable = str(endpoint.path)
+    if not os.path.isabs(executable):
+        raise LocalApiError(
+            "invalid_endpoint",
+            "stdio local-api executable path must be absolute",
+        )
+
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            executable,
+            cwd=os.path.abspath(os.sep),
+            env=_stdio_env(),
+            **spawn_kwargs(
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            ),
+        )
+    except (FileNotFoundError, PermissionError, OSError) as exc:
+        raise LocalApiError(
+            "endpoint_unreachable",
+            f"cannot spawn configured stdio endpoint: {exc.__class__.__name__}",
+        ) from exc
+
+    request = (json.dumps(payload, separators=(",", ":")) + "\n").encode()
+    try:
+        if proc.stdin is None:
+            raise LocalApiError("bad_response", "stdio endpoint stdin unavailable")
+        proc.stdin.write(request)
+        try:
+            await proc.stdin.drain()
+        except (BrokenPipeError, ConnectionResetError):
+            # The child may have exited immediately; the structured exit/result
+            # handling below classifies that without exposing raw diagnostics.
+            pass
+        proc.stdin.close()
+
+        stdout_task = asyncio.create_task(
+            _read_bounded_stream(
+                proc.stdout,
+                limit=MAX_STDIO_RESPONSE_BYTES,
+                label="stdio endpoint stdout",
+            )
+        )
+        stderr_task = asyncio.create_task(
+            _read_bounded_stream(
+                proc.stderr,
+                limit=MAX_STDIO_STDERR_BYTES,
+                label="stdio endpoint stderr",
+            )
+        )
+        wait_task = asyncio.create_task(proc.wait())
+        tasks = (stdout_task, stderr_task, wait_task)
+        try:
+            stdout, stderr, _ = await asyncio.wait_for(
+                asyncio.gather(*tasks),
+                timeout=endpoint.timeout_s,
+            )
+        except TimeoutError as exc:
+            await _kill_and_wait(proc)
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            raise LocalApiError(
+                "timeout",
+                f"{endpoint.name} stdio endpoint did not answer in time",
+            ) from exc
+        except LocalApiError:
+            await _kill_and_wait(proc)
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            raise
+    finally:
+        if proc.stdin is not None and not proc.stdin.is_closing():
+            proc.stdin.close()
+
+    if proc.returncode != 0:
+        stderr_class = "nonempty" if stderr else "empty"
+        raise LocalApiError(
+            "endpoint_process_failed",
+            f"stdio endpoint exited rc={proc.returncode}; stderr={stderr_class}",
+        )
+
+    if not stdout:
+        raise LocalApiError("bad_response", "stdio endpoint returned no JSON response")
+
+    lines = stdout.splitlines()
+    nonempty = [line for line in lines if line.strip()]
+    if len(nonempty) != 1:
+        raise LocalApiError(
+            "bad_response",
+            "stdio endpoint must return exactly one JSON response line",
+        )
+    try:
+        message = json.loads(nonempty[0])
+    except ValueError as exc:
+        raise LocalApiError(
+            "bad_response",
+            "stdio endpoint did not return valid JSON",
+        ) from exc
+    if not isinstance(message, dict):
+        raise LocalApiError(
+            "bad_response",
+            "stdio endpoint JSON response must be an object",
+        )
+    if message.get("error"):
+        err = message["error"]
+        raise LocalApiError(
+            "endpoint_error",
+            (
+                f"{err.get('code')}: {err.get('message')}"
+                if isinstance(err, dict)
+                else "endpoint returned a JSON-RPC error"
+            ),
+        )
+    return message.get("result")
+
+
 async def call_jsonrpc(endpoint: Any, action: Any, params: dict[str, Any]) -> Any:
-    """One JSON-RPC 2.0 call over a unix socket, newline framed."""
+    """One JSON-RPC 2.0 call over the endpoint's declared transport."""
     payload = {
         "jsonrpc": "2.0",
         # A STRING id. JSON-RPC 2.0 permits either, but a receiver may declare
@@ -286,6 +469,15 @@ async def call_jsonrpc(endpoint: Any, action: Any, params: dict[str, Any]) -> An
         "method": action.method,
         "params": params or {},
     }
+    transport = str(getattr(endpoint, "transport", "unix") or "unix")
+    if transport == "stdio":
+        return await _call_jsonrpc_stdio(endpoint, payload)
+    if transport != "unix":
+        raise LocalApiError(
+            "unsupported_transport_protocol",
+            f"unsupported local-api transport {transport!r} for jsonrpc",
+        )
+
     if getattr(endpoint, "run_as", None):
         line = await _call_via_run_as(
             endpoint, (json.dumps(payload) + "\n").encode()

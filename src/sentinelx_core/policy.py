@@ -469,8 +469,26 @@ class Policy:
                     name, protocol,
                 )
                 continue
+            if transport == "stdio" and protocol != "jsonrpc":
+                logger.warning(
+                    "local_apis: %s has unsupported transport/protocol pair "
+                    "stdio/%s; stdio supports jsonrpc only; skipped",
+                    name,
+                    protocol,
+                )
+                continue
             if not path_value:
                 logger.warning("local_apis: %s has no path; skipped", name)
+                continue
+            if transport == "stdio" and not os.path.isabs(path_value):
+                logger.warning(
+                    "local_apis: %s stdio path must be absolute; skipped", name
+                )
+                continue
+            if transport == "stdio" and meta.get("run_as"):
+                logger.warning(
+                    "local_apis: %s stdio run_as is unsupported; skipped", name
+                )
                 continue
             if not isinstance(raw_actions, dict) or not raw_actions:
                 # Deliberate: no list, no endpoint. Registering one without an
@@ -545,6 +563,10 @@ class Policy:
                     probe.get("method") or probe.get("request")
                 ):
                     problem = "compatibility.probe needs a `method` or a `request`"
+                elif transport == "stdio" and not probe.get("method"):
+                    problem = (
+                        "stdio/jsonrpc compatibility.probe requires a `method`"
+                    )
                 elif not extract:
                     problem = "compatibility.extract must name the field to read"
                 elif not isinstance(accept, dict) or not (
