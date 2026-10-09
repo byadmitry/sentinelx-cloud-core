@@ -91,3 +91,31 @@ async def test_the_error_is_actionable(locked):
         await make_read_handler(pol)({"path": str(root / "locked" / "inner" / "f.json")})
     msg = str(e.value).lower()
     assert "unix permission" in msg
+
+
+# --- Python 3.14 (sxrep_C3Q86CHYQ292) -----------------------------------------
+# From 3.14, Path.exists() returns False on EACCES instead of raising, so a probe
+# built on it reported "path does not exist" for files sudo could read. These two
+# tests pin the behaviour on ANY Python, not only on 3.14.
+
+
+def test_no_permission_is_not_missing_whatever_path_exists_says(monkeypatch, tmp_path):
+    import errno
+
+    from sentinelx_core.handlers import fileops
+
+    def denied(p, *a, **k):
+        raise PermissionError(errno.EACCES, "Permission denied", str(p))
+
+    monkeypatch.setattr(fileops.Path, "exists", lambda self, *a, **k: False)   # what 3.14 does
+    monkeypatch.setattr(fileops.os, "stat", denied)
+    assert fileops._probably_missing(tmp_path / "locked" / "f.json") is False
+
+
+def test_a_path_that_is_not_there_is_missing(tmp_path):
+    from sentinelx_core.handlers import fileops
+
+    (tmp_path / "file").write_text("x")
+    assert fileops._probably_missing(tmp_path / "nope") is True              # ENOENT
+    assert fileops._probably_missing(tmp_path / "file" / "child") is True    # ENOTDIR
+    assert fileops._probably_missing(tmp_path / "file") is False             # it exists

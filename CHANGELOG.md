@@ -3,7 +3,25 @@
 Notable changes to `sentinelx-cloud-core`. Human-readable, date-stamped
 entries; releases before 0.3.0 predate this file — see the git history.
 
-## Unreleased - The Linux update playbooks no longer run git in the root-owned checkout - 2026-10-07
+## 0.23.11 - A directory the agent can't enter is 'permission denied' again on Python 3.14 - 2026-10-09
+
+On Python 3.14, read and list reported 'path does not exist' for files under a directory the
+agent's user can't enter, which sudo could read fine (sxrep_C3Q86CHYQ292, Ubuntu 26.04). From
+3.14, pathlib.Path.exists() returns False on EACCES instead of raising PermissionError, and
+fileops._probably_missing relied on the exception to tell 'missing' from 'can't look'. 469 of
+3,421 hosts run Ubuntu 26.04, which ships 3.14.
+
+- _probably_missing decides on os.stat's errno, which is the same on every version: only
+  ENOENT, ENOTDIR, ELOOP and EBADF (what Path.exists() treated as absent up to 3.13) mean
+  missing; anything else is reported as the permission problem it is.
+- tests/test_unreadable_parent.py already caught it on 3.14 (4 of 7 failed) but CI never ran
+  the tests. Two new tests pin the behaviour on any Python (one simulates 3.14's exists()).
+  Full suite: 630 passed on 3.12 and on 3.14. Sabotage (back to Path.exists()) caught on 3.12.
+- CI: a pytest job on Python 3.12 and 3.14. Not in the release job's `needs`, so a runner
+  difference can't block a release; the suite never ran on GitHub before.
+- Also ships the config change below (update playbooks, 2026-10-07).
+
+## Released with 0.23.11 - The Linux update playbooks no longer run git in the root-owned checkout - 2026-10-07
 
 Config-only (config.example.yaml); no code change and no version bump, on purpose: the
 hub updates a host whose version differs from latest_agent_version, so a version on main

@@ -86,6 +86,7 @@ from concurrent.futures import ThreadPoolExecutor
 import codecs
 import fnmatch
 import functools
+import errno
 import os
 import re
 import stat
@@ -192,20 +193,29 @@ def _stat_safe(p: Path) -> os.stat_result | None:
         return None
 
 
+# errno values that mean "the path is not there". The same set Path.exists()
+# treated as absent up to Python 3.13; anything else (EACCES, EPERM, ...) means
+# we could not look, which is not the same as missing.
+_MISSING_ERRNOS = frozenset({errno.ENOENT, errno.ENOTDIR, errno.ELOOP, errno.EBADF})
+
+
 def _probably_missing(p: Path) -> bool:
     """True only if we could actually confirm the path is absent.
 
-    Path.exists() traverses every parent, so on a directory the agent cannot
-    enter it raises PermissionError -- and a bare probe there escapes as
-    "internal_error: [Errno 13]", losing the permission_denied guidance the
-    caller should have got. When the probe cannot answer, "missing" is
-    unproven, so we report the permission problem instead, which is the
-    accurate thing to say when we cannot even look.
+    Decided on os.stat's errno, not on Path.exists(). Up to Python 3.13,
+    Path.exists() raised PermissionError on a parent the agent cannot enter;
+    from 3.14 it returns False instead, which turned "no permission" into "path
+    does not exist" on every host running 3.14 (Ubuntu 26.04 ships it;
+    sxrep_C3Q86CHYQ292: files that sudo could read reported as missing).
+    os.stat reports EACCES the same way on every version. When we cannot even
+    look, "missing" is unproven, so the caller reports the permission problem,
+    which is the accurate thing to say.
     """
     try:
-        return not p.exists()
-    except OSError:
-        return False
+        os.stat(p)
+    except OSError as exc:
+        return exc.errno in _MISSING_ERRNOS
+    return False
 
 
 def _file_type(st: os.stat_result) -> str:
