@@ -589,11 +589,13 @@ async def ensure_compatible(endpoint: Any) -> None:
     if not constraint:
         return
 
-    cached = _compat_verdicts.get(endpoint.name)
-    if cached is True:
-        return
-    if isinstance(cached, tuple):
-        raise LocalApiError(cached[0], cached[1])
+    cacheable = str(getattr(endpoint, "transport", "unix") or "unix") != "stdio"
+    if cacheable:
+        cached = _compat_verdicts.get(endpoint.name)
+        if cached is True:
+            return
+        if isinstance(cached, tuple):
+            raise LocalApiError(cached[0], cached[1])
 
     probe = constraint["probe"]
     accept = constraint["accept"]
@@ -632,7 +634,8 @@ async def ensure_compatible(endpoint: Any) -> None:
             f"could not read the compatibility metadata '{field}' from "
             f"'{endpoint.name}': {exc.message}",
         )
-        _compat_verdicts[endpoint.name] = verdict
+        if cacheable:
+            _compat_verdicts[endpoint.name] = verdict
         raise LocalApiError(*verdict) from exc
 
     found = _extract(reply, field)
@@ -642,7 +645,8 @@ async def ensure_compatible(endpoint: Any) -> None:
             f"'{endpoint.name}' did not report '{field}', so its compatibility "
             "cannot be established. Refusing rather than assuming.",
         )
-        _compat_verdicts[endpoint.name] = verdict
+        if cacheable:
+            _compat_verdicts[endpoint.name] = verdict
         raise LocalApiError(*verdict)
 
     if "exact" in accept:
@@ -660,13 +664,15 @@ async def ensure_compatible(endpoint: Any) -> None:
             "profile's maintainer says the versions are compatible; SentinelX "
             "will not assume a newer version is.",
         )
-        _compat_verdicts[endpoint.name] = verdict
+        if cacheable:
+            _compat_verdicts[endpoint.name] = verdict
         logger.warning(
             "local_api compatibility mismatch on %s: %s=%r", endpoint.name, field, found
         )
         raise LocalApiError(*verdict)
 
-    _compat_verdicts[endpoint.name] = True
+    if cacheable:
+        _compat_verdicts[endpoint.name] = True
     logger.info(
         "local_api compatibility ok on %s: %s=%r", endpoint.name, field, found
     )

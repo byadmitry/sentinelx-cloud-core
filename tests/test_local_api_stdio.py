@@ -288,6 +288,49 @@ async def test_stdio_compatibility_probe_uses_same_transport(tmp_path: Path) -> 
     assert result == {"probe_seen": True}
 
 
+async def test_stdio_compatibility_is_reprobed_for_each_process_epoch(
+    tmp_path: Path,
+) -> None:
+    counter = tmp_path / "probe-count"
+    endpoint = _script(
+        tmp_path,
+        f"""
+        import json
+        from pathlib import Path
+        import sys
+
+        request = json.loads(sys.stdin.readline())
+        if request["method"] == "identity.describe":
+            path = Path({str(counter)!r})
+            count = int(path.read_text()) if path.exists() else 0
+            path.write_text(str(count + 1))
+            result = {{"api_version": "1"}}
+        else:
+            result = {{"ok": True}}
+        print(json.dumps({{
+            "jsonrpc": "2.0",
+            "id": request["id"],
+            "result": result,
+        }}))
+        """,
+    )
+    policy = _policy(
+        tmp_path,
+        endpoint,
+        compatibility="""
+        compatibility:
+          probe: { method: identity.describe }
+          extract: api_version
+          accept: { exact: "1" }
+        """,
+    )
+
+    await call_action(policy.local_apis["test"], "echo", {})
+    await call_action(policy.local_apis["test"], "echo", {})
+
+    assert counter.read_text() == "2"
+
+
 async def test_stdio_compatibility_mismatch_fails_closed(tmp_path: Path) -> None:
     endpoint = _script(
         tmp_path,
